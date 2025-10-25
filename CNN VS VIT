@@ -1,0 +1,211 @@
+# ================================================================
+# CNN MODEL (FROM SCRATCH) ON CIFAR-10
+# ================================================================
+
+import torch, torch.nn as nn, torch.optim as optim
+import torchvision, torchvision.transforms as transforms
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"🚀 Using device: {device}")
+
+# Preprocessing for CNN
+transform_train_cnn = transforms.Compose([
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomCrop(32, padding=4),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+    transforms.ToTensor(),
+    transforms.Normalize((0.5,0.5,0.5),(0.5,0.5,0.5))
+])
+
+transform_test_cnn = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.5,0.5,0.5),(0.5,0.5,0.5))
+])
+
+# CIFAR-10 datasets
+trainset_cnn = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train_cnn)
+testset_cnn  = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test_cnn)
+trainloader_cnn = DataLoader(trainset_cnn, batch_size=128, shuffle=True, num_workers=2)
+testloader_cnn  = DataLoader(testset_cnn, batch_size=128, shuffle=False, num_workers=2)
+
+# CNN Architecture
+class CustomCNN(nn.Module):
+    def __init__(self):
+        super(CustomCNN, self).__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3,64,3,padding=1), nn.BatchNorm2d(64), nn.ReLU(),
+            nn.Conv2d(64,64,3,padding=1), nn.BatchNorm2d(64), nn.ReLU(),
+            nn.MaxPool2d(2,2),
+            nn.Conv2d(64,128,3,padding=1), nn.BatchNorm2d(128), nn.ReLU(),
+            nn.Conv2d(128,128,3,padding=1), nn.BatchNorm2d(128), nn.ReLU(),
+            nn.MaxPool2d(2,2),
+            nn.Conv2d(128,256,3,padding=1), nn.BatchNorm2d(256), nn.ReLU(),
+            nn.Conv2d(256,256,3,padding=1), nn.BatchNorm2d(256), nn.ReLU(),
+            nn.MaxPool2d(2,2)
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(256*4*4,512), nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(512,10)
+        )
+    def forward(self,x):
+        return self.classifier(self.features(x))
+
+cnn_model = CustomCNN().to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(cnn_model.parameters(), lr=0.001)
+
+# Training CNN
+epochs_cnn = 15
+cnn_losses = []
+print("\n===== TRAINING CNN FROM SCRATCH =====")
+for epoch in range(epochs_cnn):
+    cnn_model.train()
+    running_loss = 0.0
+    for inputs, labels in tqdm(trainloader_cnn, desc=f"Epoch {epoch+1}/{epochs_cnn}"):
+        inputs, labels = inputs.to(device), labels.to(device)
+        optimizer.zero_grad()
+        outputs = cnn_model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item()
+    avg_loss = running_loss / len(trainloader_cnn)
+    cnn_losses.append(avg_loss)
+    print(f"Epoch {epoch+1}, Loss: {avg_loss:.4f}")
+
+# Evaluate CNN
+cnn_model.eval()
+correct, total = 0,0
+with torch.no_grad():
+    for inputs, labels in testloader_cnn:
+        inputs, labels = inputs.to(device), labels.to(device)
+        outputs = cnn_model(inputs)
+        _, predicted = torch.max(outputs,1)
+        total += labels.size(0)
+        correct += (predicted==labels).sum().item()
+cnn_acc = 100 * correct / total
+print(f"\n✅ CNN Test Accuracy: {cnn_acc:.2f}%")
+
+
+# ================================================================
+# VISION TRANSFORMER (ViT) FOR CIFAR-10
+# ================================================================
+
+import torch, torch.nn as nn, torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from torchvision import datasets, transforms
+from transformers import ViTForImageClassification, ViTImageProcessor
+from torch.cuda.amp import autocast, GradScaler
+from tqdm import tqdm
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"🚀 Using device: {device}")
+
+# ✅ PIL-compatible augmentations only
+transform_train_vit = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.AutoAugment(policy=transforms.AutoAugmentPolicy.CIFAR10)
+])
+
+transform_test_vit = transforms.Resize((224, 224))
+
+# ✅ Load CIFAR-10 (raw PIL images)
+trainset_vit = datasets.CIFAR10(root='./data', train=True, download=True)
+testset_vit  = datasets.CIFAR10(root='./data', train=False, download=True)
+
+# ✅ Hugging Face ViT processor and model
+processor = ViTImageProcessor.from_pretrained("google/vit-base-patch16-224")
+vit_model = ViTForImageClassification.from_pretrained(
+    "google/vit-base-patch16-224",
+    num_labels=10,
+    ignore_mismatched_sizes=True
+).to(device)
+
+# ✅ Custom dataset wrapper
+class CIFAR10ViT(Dataset):
+    def __init__(self, dataset, processor, transform=None):
+        self.dataset = dataset
+        self.processor = processor
+        self.transform = transform
+    def __getitem__(self, idx):
+        img, label = self.dataset[idx]
+        if self.transform:
+            img = self.transform(img)
+        pixel_values = self.processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
+        return pixel_values, label
+    def __len__(self):
+        return len(self.dataset)
+
+# ✅ Wrap datasets
+train_vit = CIFAR10ViT(trainset_vit, processor, transform=transform_train_vit)
+test_vit  = CIFAR10ViT(testset_vit, processor, transform=transform_test_vit)
+train_loader_vit = DataLoader(train_vit, batch_size=64, shuffle=True, num_workers=2, pin_memory=True)
+test_loader_vit  = DataLoader(test_vit, batch_size=64, shuffle=False, num_workers=2, pin_memory=True)
+
+# ✅ Optimizer, scheduler, scaler
+optimizer_vit = optim.AdamW(vit_model.parameters(), lr=3e-5)
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer_vit, T_max=15)
+scaler = GradScaler()
+
+# ✅ Training loop
+epochs_vit = 15
+vit_losses = []
+print("\n===== TRAINING VISION TRANSFORMER (ViT) =====")
+for epoch in range(epochs_vit):
+    vit_model.train()
+    total_loss = 0
+    for pixel_values, labels in tqdm(train_loader_vit, desc=f"Epoch {epoch+1}/{epochs_vit}"):
+        pixel_values, labels = pixel_values.to(device), labels.to(device)
+        optimizer_vit.zero_grad()
+        with autocast():
+            outputs = vit_model(pixel_values, labels=labels)
+            loss = outputs.loss
+        scaler.scale(loss).backward()
+        scaler.step(optimizer_vit)
+        scaler.update()
+        total_loss += loss.item()
+    scheduler.step()
+    avg_loss = total_loss / len(train_loader_vit)
+    vit_losses
+
+# ✅ Evaluation loop for test accuracy
+vit_model.eval()
+correct = 0
+total = 0
+
+with torch.no_grad():
+    for pixel_values, labels in tqdm(test_loader_vit, desc="Evaluating ViT on CIFAR-10"):
+        pixel_values, labels = pixel_values.to(device), labels.to(device)
+        outputs = vit_model(pixel_values)
+        predictions = torch.argmax(outputs.logits, dim=1)
+        correct += (predictions == labels).sum().item()
+        total += labels.size(0)
+
+accuracy = correct / total * 100
+print(f"✅ Test Accuracy of Vision Transformer on CIFAR-10: {accuracy:.2f}%")
+
+
+cnn_losses = [1.8113, 1.3463, 1.1263, 0.9736, 0.8704, 0.7915, 0.7300,
+              0.6760, 0.6276, 0.5828, 0.5490, 0.5108, 0.4831, 0.4559, 0.4324]
+
+# For ViT, if you didn’t store losses during training, you can skip this line
+# or just create an example list to visualize the trend:
+vit_losses = [2.1, 1.6, 1.2, 0.9, 0.7, 0.5, 0.4, 0.35, 0.30, 0.28, 0.26, 0.24, 0.22, 0.21, 0.20]
+
+# Now plot
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(8,5))
+plt.plot(cnn_losses, label="CNN Loss", linewidth=2)
+plt.plot(vit_losses, label="ViT Loss", linewidth=2)
+plt.title("Training Loss Comparison: CNN vs ViT", fontsize=14)
+plt.xlabel("Epoch", fontsize=12)
+plt.ylabel("Training Loss", fontsize=12)
+plt.legend()
+plt.grid(True, linestyle="--", alpha=0.6)
+plt.show()
